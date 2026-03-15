@@ -38,8 +38,10 @@ cd project_wakeup
 python -m venv .venv
 # On macOS / Linux:
 source .venv/bin/activate
-# On Windows (Command Prompt):
+# On Windows (Command Prompt / PowerShell):
 .venv\Scripts\activate.bat
+# On Windows (Git Bash / MINGW64):
+source .venv/Scripts/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -47,6 +49,18 @@ pip install -r requirements.txt
 
 > **Note – Apple Silicon (M1/M2):** Replace `opencv-python` with
 > `opencv-python-headless` if you encounter build issues.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `bash: .venv/bin/activate: No such file or directory` on Windows | Git Bash uses `Scripts/` not `bin/` | Use `source .venv/Scripts/activate` |
+| `ERROR: Face detector could not be initialised` | mediapipe incompatibility | Ensure you are using Python 3.9–3.12; mediapipe support for Python 3.13 may be limited |
+| `WARNING: Phone detector could not be initialised` | ultralytics/YOLO issue | Phone detection is disabled automatically; face-based detection still works |
+| `ERROR: Cannot open webcam` | No camera found | Connect a webcam and ensure no other app is using it |
+| Black screen / camera not working on Linux | Missing video device permissions | Run `sudo usermod -aG video $USER` and log out/in |
 
 ---
 
