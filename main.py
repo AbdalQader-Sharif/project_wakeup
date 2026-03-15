@@ -121,7 +121,14 @@ def main() -> None:
         sys.exit(1)
 
     print("Initialising detectors …")
-    face_detector = FaceDetector()
+    try:
+        face_detector = FaceDetector()
+    except Exception as exc:
+        print(f"ERROR: Face detector could not be initialised: {exc}")
+        print("       Check that mediapipe is correctly installed for your")
+        print("       Python version (Python 3.9–3.12 are best supported).")
+        cap.release()
+        sys.exit(1)
     try:
         phone_detector: PhoneDetector | None = PhoneDetector()
     except Exception as exc:
