@@ -22,5 +22,8 @@ build/
 *.pt
 runs/
 
+# MediaPipe auto-downloaded task models
+*.task
+
 # Usage log
 phone_usage_log.txt
