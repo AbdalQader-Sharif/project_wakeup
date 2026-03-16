@@ -4,8 +4,10 @@ detector.py – Face-landmark detection, head-pose estimation, and phone detecti
 Classes
 -------
 FaceDetector
-    Wraps MediaPipe FaceMesh to detect face landmarks and estimate whether the
-    user is looking downward by computing a head-pitch angle via solvePnP.
+    Wraps MediaPipe FaceMesh (legacy ``solutions`` API for mediapipe <0.10.22)
+    or MediaPipe FaceLandmarker (Tasks API for mediapipe ≥0.10.22) to detect
+    face landmarks and estimate whether the user is looking downward by
+    computing a head-pitch angle via solvePnP.
 
 PhoneDetector
     Wraps YOLOv8 to detect a "cell phone" in a video frame.
@@ -14,7 +16,9 @@ PhoneDetector
 from __future__ import annotations
 
 import math
+import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
@@ -22,6 +26,43 @@ import mediapipe as mp
 import numpy as np
 
 from src import config
+
+# ---------------------------------------------------------------------------
+# MediaPipe API detection
+# ---------------------------------------------------------------------------
+
+# mediapipe < 0.10.22 shipped a bundled "solutions" subpackage (legacy API).
+# mediapipe ≥ 0.10.22 removed it in favour of the Tasks API.
+_USE_SOLUTIONS_API: bool = hasattr(mp, "solutions")
+
+# Model used by the Tasks API (face_landmarks).  Downloaded on first use and
+# cached next to this file so it survives across runs.
+_TASKS_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
+_TASKS_MODEL_PATH = Path(__file__).parent / "face_landmarker.task"
+
+
+def _ensure_face_landmarker_model() -> str:
+    """Download the face-landmarker Tasks-API model if it is not cached yet.
+
+    Returns the local path to the model file as a string.
+    """
+    if not _TASKS_MODEL_PATH.exists():
+        print(
+            f"Downloading face-landmarker model to {_TASKS_MODEL_PATH} …",
+            flush=True,
+        )
+        try:
+            urllib.request.urlretrieve(_TASKS_MODEL_URL, _TASKS_MODEL_PATH)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not download the face-landmarker model: {exc}\n"
+                f"Please download it manually from:\n  {_TASKS_MODEL_URL}\n"
+                f"and save it to:\n  {_TASKS_MODEL_PATH}"
+            ) from exc
+    return str(_TASKS_MODEL_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +131,11 @@ _DRAW_LANDMARK_IDS = [
 # ---------------------------------------------------------------------------
 
 class FaceDetector:
-    """Detect face landmarks and estimate head pose using MediaPipe FaceMesh."""
+    """Detect face landmarks and estimate head pose using MediaPipe.
+
+    Uses the legacy ``solutions.face_mesh`` API when available
+    (mediapipe < 0.10.22) and the Tasks ``FaceLandmarker`` API otherwise.
+    """
 
     def __init__(
         self,
@@ -99,15 +144,35 @@ class FaceDetector:
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
     ) -> None:
-        self._mp_face_mesh = mp.solutions.face_mesh
-        self._face_mesh = self._mp_face_mesh.FaceMesh(
-            max_num_faces=max_num_faces,
-            refine_landmarks=refine_landmarks,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
         self._camera_matrix: Optional[np.ndarray] = None
         self._dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+        if _USE_SOLUTIONS_API:
+            # Legacy API – mediapipe < 0.10.22
+            self._mp_face_mesh = mp.solutions.face_mesh
+            self._face_mesh = self._mp_face_mesh.FaceMesh(
+                max_num_faces=max_num_faces,
+                refine_landmarks=refine_landmarks,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+        else:
+            # Tasks API – mediapipe ≥ 0.10.22
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision as mp_vision
+
+            model_path = _ensure_face_landmarker_model()
+            base_options = mp_python.BaseOptions(model_asset_path=model_path)
+            options = mp_vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                num_faces=max_num_faces,
+                min_face_detection_confidence=min_detection_confidence,
+                min_face_presence_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+            self._face_mesh = mp_vision.FaceLandmarker.create_from_options(
+                options
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,13 +184,14 @@ class FaceDetector:
         self._ensure_camera_matrix(w, h)
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self._face_mesh.process(rgb)
 
-        if not results.multi_face_landmarks:
+        if _USE_SOLUTIONS_API:
+            lm = self._process_solutions(rgb)
+        else:
+            lm = self._process_tasks(rgb)
+
+        if lm is None:
             return FaceResult(detected=False)
-
-        face_landmarks = results.multi_face_landmarks[0]
-        lm = face_landmarks.landmark  # list of NormalizedLandmark
 
         # Convert to pixel coordinates
         px = [(int(p.x * w), int(p.y * h)) for p in lm]
@@ -158,6 +224,29 @@ class FaceDetector:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _process_solutions(self, rgb: np.ndarray):
+        """Run detection using the legacy solutions API.
+
+        Returns the list of NormalizedLandmark for the first detected face,
+        or ``None`` if no face was found.
+        """
+        results = self._face_mesh.process(rgb)
+        if not results.multi_face_landmarks:
+            return None
+        return results.multi_face_landmarks[0].landmark
+
+    def _process_tasks(self, rgb: np.ndarray):
+        """Run detection using the Tasks API.
+
+        Returns the list of NormalizedLandmark for the first detected face,
+        or ``None`` if no face was found.
+        """
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._face_mesh.detect(mp_image)
+        if not result.face_landmarks:
+            return None
+        return result.face_landmarks[0]
 
     def _ensure_camera_matrix(self, w: int, h: int) -> None:
         if self._camera_matrix is not None:

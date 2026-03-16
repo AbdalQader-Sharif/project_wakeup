@@ -7,7 +7,6 @@ dependencies (mediapipe, ultralytics).
 
 from __future__ import annotations
 
-import types
 import sys
 from unittest.mock import MagicMock, patch
 import numpy as np
@@ -59,51 +58,88 @@ def test_phone_result_defaults():
 class TestFaceDetector:
     """Unit-test FaceDetector with mocked MediaPipe."""
 
+    # ------------------------------------------------------------------
+    # Helpers for legacy solutions API (mediapipe < 0.10.22)
+    # ------------------------------------------------------------------
+
     def _make_detector(self):
-        """Return a FaceDetector whose MediaPipe internals are mocked."""
+        """Return a FaceDetector whose MediaPipe internals are mocked
+        using the legacy solutions API."""
         mp_mock = MagicMock()
         face_mesh_instance = MagicMock()
         mp_mock.solutions.face_mesh.FaceMesh.return_value = face_mesh_instance
-        with patch.dict(sys.modules, {"mediapipe": mp_mock}):
-            from importlib import reload
-            import src.detector as det_mod
-            reload(det_mod)
+        import src.detector as det_mod
+        with patch.object(det_mod, "mp", mp_mock), \
+             patch.object(det_mod, "_USE_SOLUTIONS_API", True):
             detector = det_mod.FaceDetector()
+        detector._face_mesh = face_mesh_instance
         return detector, face_mesh_instance
 
+    # ------------------------------------------------------------------
+    # Tests – legacy solutions API
+    # ------------------------------------------------------------------
+
     def test_no_face_returns_not_detected(self):
-        detector, mesh = self._make_detector()
-        mesh.process.return_value = MagicMock(multi_face_landmarks=None)
+        import src.detector as det_mod
+        mp_mock = MagicMock()
+        face_mesh_instance = MagicMock()
+        mp_mock.solutions.face_mesh.FaceMesh.return_value = face_mesh_instance
+        face_mesh_instance.process.return_value = MagicMock(multi_face_landmarks=None)
+
         frame = _make_frame()
-        with patch("cv2.cvtColor", return_value=frame):
-            result = detector.process(frame)
+        with patch.object(det_mod, "mp", mp_mock), \
+             patch.object(det_mod, "_USE_SOLUTIONS_API", True):
+            detector = det_mod.FaceDetector()
+            with patch("cv2.cvtColor", return_value=frame):
+                result = detector.process(frame)
         assert result.detected is False
 
     def test_face_detected_sets_flag(self):
-        detector, mesh = self._make_detector()
+        import src.detector as det_mod
+        mp_mock = MagicMock()
+        face_mesh_instance = MagicMock()
+        mp_mock.solutions.face_mesh.FaceMesh.return_value = face_mesh_instance
 
         # Build 478 fake landmarks (mediapipe refine gives 478)
         lms = [_make_fake_landmark(0.5, 0.5) for _ in range(478)]
         face_lm_group = MagicMock()
         face_lm_group.landmark = lms
-        mesh.process.return_value = MagicMock(
+        face_mesh_instance.process.return_value = MagicMock(
             multi_face_landmarks=[face_lm_group]
         )
 
         frame = _make_frame()
-        with patch("cv2.cvtColor", return_value=frame), \
-             patch("cv2.solvePnP", return_value=(False, None, None)):
-            result = detector.process(frame)
+        with patch.object(det_mod, "mp", mp_mock), \
+             patch.object(det_mod, "_USE_SOLUTIONS_API", True):
+            detector = det_mod.FaceDetector()
+            with patch("cv2.cvtColor", return_value=frame), \
+                 patch("cv2.solvePnP", return_value=(False, None, None)):
+                result = detector.process(frame)
 
         assert result.detected is True
         assert result.bounding_box is not None
 
     def test_bounding_box_within_frame(self):
-        detector, mesh = self._make_detector_with_face()
+        import src.detector as det_mod
+        mp_mock = MagicMock()
+        face_mesh_instance = MagicMock()
+        mp_mock.solutions.face_mesh.FaceMesh.return_value = face_mesh_instance
+
+        lms = [_make_fake_landmark(0.5, 0.5) for _ in range(478)]
+        face_lm_group = MagicMock()
+        face_lm_group.landmark = lms
+        face_mesh_instance.process.return_value = MagicMock(
+            multi_face_landmarks=[face_lm_group]
+        )
+
         frame = _make_frame(480, 640)
-        with patch("cv2.cvtColor", return_value=frame), \
-             patch("cv2.solvePnP", return_value=(False, None, None)):
-            result = detector.process(frame)
+        with patch.object(det_mod, "mp", mp_mock), \
+             patch.object(det_mod, "_USE_SOLUTIONS_API", True):
+            detector = det_mod.FaceDetector()
+            with patch("cv2.cvtColor", return_value=frame), \
+                 patch("cv2.solvePnP", return_value=(False, None, None)):
+                result = detector.process(frame)
+
         if result.detected and result.bounding_box:
             x, y, w, h = result.bounding_box
             assert x >= 0
@@ -111,15 +147,47 @@ class TestFaceDetector:
             assert x + w <= 640
             assert y + h <= 480
 
-    def _make_detector_with_face(self):
-        detector, mesh = self._make_detector()
+    # ------------------------------------------------------------------
+    # Tests – Tasks API (mediapipe >= 0.10.22)
+    # ------------------------------------------------------------------
+
+    def _make_tasks_detector_direct(self, face_landmarker_instance):
+        """Build a FaceDetector with Tasks API internals set directly,
+        bypassing __init__ to avoid complex import mocking."""
+        import src.detector as det_mod
+        detector = object.__new__(det_mod.FaceDetector)
+        detector._camera_matrix = None
+        detector._dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+        detector._face_mesh = face_landmarker_instance
+        return detector
+
+    def test_tasks_api_no_face_returns_not_detected(self):
+        import src.detector as det_mod
+        face_landmarker_instance = MagicMock()
+        face_landmarker_instance.detect.return_value = MagicMock(face_landmarks=[])
+
+        detector = self._make_tasks_detector_direct(face_landmarker_instance)
+        frame = _make_frame()
+        with patch.object(det_mod, "_USE_SOLUTIONS_API", False), \
+             patch("cv2.cvtColor", return_value=frame):
+            result = detector.process(frame)
+        assert result.detected is False
+
+    def test_tasks_api_face_detected_sets_flag(self):
+        import src.detector as det_mod
         lms = [_make_fake_landmark(0.5, 0.5) for _ in range(478)]
-        face_lm_group = MagicMock()
-        face_lm_group.landmark = lms
-        mesh.process.return_value = MagicMock(
-            multi_face_landmarks=[face_lm_group]
-        )
-        return detector, mesh
+        face_landmarker_instance = MagicMock()
+        face_landmarker_instance.detect.return_value = MagicMock(face_landmarks=[lms])
+
+        detector = self._make_tasks_detector_direct(face_landmarker_instance)
+        frame = _make_frame()
+        with patch.object(det_mod, "_USE_SOLUTIONS_API", False), \
+             patch("cv2.cvtColor", return_value=frame), \
+             patch("cv2.solvePnP", return_value=(False, None, None)):
+            result = detector.process(frame)
+
+        assert result.detected is True
+        assert result.bounding_box is not None
 
 
 # ---------------------------------------------------------------------------
